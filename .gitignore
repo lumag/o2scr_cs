@@ -1,0 +1,7 @@
+*.ko
+*.mod.*
+*.o
+.*cmd
+.*swp
+.tmp_versions/
+[Mm]odule*
