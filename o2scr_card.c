@@ -5,16 +5,11 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
 
-struct o2scr_info {
-	struct pcmcia_device	*p_dev;
-	void __iomem		*io;
-	void __iomem		*mem;
-};
+#include "o2scr.h"
 
 static irqreturn_t o2scr_interrupt(int irq, void *dev_id)
 {
 	pr_debug("interrupt\n");
-	return IRQ_NONE;
 
 #if 0
 	/* Acknowledge interrupt to reader. */
@@ -22,6 +17,8 @@ static irqreturn_t o2scr_interrupt(int irq, void *dev_id)
 	ack &= ~OZSCR_IRQACK;
 	outb(ack, dev->io_base);
 #endif
+
+	return IRQ_HANDLED;
 }
 
 #define CS_CHECK(fn, ret) \
@@ -175,8 +172,19 @@ static int __devinit o2scr_probe(struct pcmcia_device *p_dev)
 	if (ret)
 		goto err_config;
 
+	ret = o2scr_dev_add(info, &p_dev->dev);
+	if (ret)
+		goto err_dev;
+
 	return 0;
 
+err_dev:
+	iounmap(info->mem);
+	info->mem = NULL;
+	ioport_unmap(info->io);
+	info->io = NULL;
+
+	pcmcia_disable_device(p_dev);
 err_config:
 	p_dev->priv = NULL;
 	kfree(info);
@@ -189,11 +197,14 @@ static void __devexit o2scr_remove(struct pcmcia_device *p_dev)
 	struct o2scr_info *info = p_dev->priv;
 
 	iounmap(info->mem);
+	info->mem = NULL;
 	ioport_unmap(info->io);
+	info->io = NULL;
 
 	pcmcia_disable_device(p_dev);
 	p_dev->priv = NULL;
-	kfree(info);
+
+	o2scr_dev_remove(info);
 }
 
 static struct pcmcia_device_id o2scr_ids[] = {
@@ -213,12 +224,26 @@ static struct pcmcia_driver o2scr_driver = {
 
 static int __init init_o2scr(void)
 {
-	return pcmcia_register_driver(&o2scr_driver);
+	int err;
+	err = o2scr_dev_init();
+	if (err)
+		return err;
+
+	err = pcmcia_register_driver(&o2scr_driver);
+	if (err)
+		goto err_driver;
+
+	return 0;
+
+err_driver:
+	o2scr_dev_exit();
+	return err;
 }
 
 static void __exit exit_o2scr(void)
 {
 	pcmcia_unregister_driver(&o2scr_driver);
+	o2scr_dev_exit();
 }
 
 module_init(init_o2scr);
