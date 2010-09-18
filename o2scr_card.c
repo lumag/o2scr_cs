@@ -21,10 +21,6 @@ static irqreturn_t o2scr_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-#define CS_CHECK(fn, ret) \
-do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
-
-
 static int __devinit o2scr_config_check(struct pcmcia_device *p_dev,
 		cistpl_cftable_entry_t *cfg,
 		cistpl_cftable_entry_t *dflt,
@@ -65,7 +61,7 @@ static int __devinit o2scr_config_check(struct pcmcia_device *p_dev,
 	if (pcmcia_request_io(p_dev, &p_dev->io) != 0)
 		return -ENODEV;
 
-	if (pcmcia_request_window(&p_dev, req, &p_dev->win) != 0)
+	if (pcmcia_request_window(p_dev, req, &p_dev->win) != 0)
 		return -ENODEV;
 
 	if (cfg->mem.nwin > 0) {
@@ -75,7 +71,7 @@ static int __devinit o2scr_config_check(struct pcmcia_device *p_dev,
 	} else
 		return -ENODEV;
 
-	if (pcmcia_map_mem_page(p_dev->win, &map) != 0)
+	if (pcmcia_map_mem_page(p_dev, p_dev->win, &map) != 0)
 		return -ENODEV;
 
 	return 0;
@@ -87,7 +83,7 @@ static int __devinit o2scr_config(struct pcmcia_device *p_dev)
 
 	tuple_t tuple;
 	u_short buf[64];
-	int last_fn, last_ret;
+	int ret;
 	win_req_t req;
 
 	tuple.TupleData = (cisdata_t *)buf;
@@ -104,9 +100,7 @@ static int __devinit o2scr_config(struct pcmcia_device *p_dev)
 
 	/* Interrupt setup */
 	p_dev->irq.Attributes = IRQ_TYPE_DYNAMIC_SHARING;
-	p_dev->irq.IRQInfo1 = IRQ_LEVEL_ID;
 	p_dev->irq.Handler = &o2scr_interrupt;
-	p_dev->irq.Instance = p_dev->priv;
 
 	/* General socket configuration */
 	p_dev->conf.IntType = INT_MEMORY_AND_IO;
@@ -117,15 +111,19 @@ static int __devinit o2scr_config(struct pcmcia_device *p_dev)
 	req.Base = 0;
 	req.AccessSpeed = 0;
 
-	last_ret = pcmcia_loop_config(p_dev, o2scr_config_check, &req);
-	if (last_ret) {
+	ret = pcmcia_loop_config(p_dev, o2scr_config_check, &req);
+	if (ret)
 		goto failed;
+
+	if (p_dev->conf.Attributes & CONF_ENABLE_IRQ) {
+		ret = pcmcia_request_irq(p_dev, &p_dev->irq);
+		if (ret)
+			goto failed;
 	}
 
-	if (p_dev->conf.Attributes & CONF_ENABLE_IRQ)
-		CS_CHECK(RequestIRQ, pcmcia_request_irq(p_dev, &p_dev->irq));
-
-	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(p_dev, &p_dev->conf));
+	ret = pcmcia_request_configuration(p_dev, &p_dev->conf);
+	if (ret)
+		goto failed;
 
 	/* Finally, report what we've done */
 	printk(KERN_INFO "o2scr sock %s: index 0x%02x",
@@ -149,8 +147,6 @@ static int __devinit o2scr_config(struct pcmcia_device *p_dev)
 	info->io = ioport_map(p_dev->io.BasePort1, p_dev->io.NumPorts1);
 
 	return 0;
-cs_failed:
-	cs_error(p_dev, last_fn, last_ret);
 failed:
 	pcmcia_disable_device(p_dev);
 	return -ENODEV;
