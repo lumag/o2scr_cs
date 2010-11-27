@@ -1,25 +1,11 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <pcmcia/cs_types.h>
 #include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
+#include <linux/version.h>
 
 #include "o2scr.h"
-
-static irqreturn_t o2scr_interrupt(int irq, void *dev_id)
-{
-	pr_debug("interrupt\n");
-
-#if 0
-	/* Acknowledge interrupt to reader. */
-	ack = inb(dev->io_base);
-	ack &= ~OZSCR_IRQACK;
-	outb(ack, dev->io_base);
-#endif
-
-	return IRQ_HANDLED;
-}
 
 static int __devinit o2scr_config_check(struct pcmcia_device *p_dev,
 		cistpl_cftable_entry_t *cfg,
@@ -28,8 +14,8 @@ static int __devinit o2scr_config_check(struct pcmcia_device *p_dev,
 		void *priv_data)
 {
 	win_req_t *req = priv_data;
-	memreq_t map;
-	map.Page = 0;
+	cistpl_io_t *io;
+	cistpl_mem_t *mem;
 
 	if (cfg->index == 0)
 		return -ENODEV;
@@ -51,27 +37,35 @@ static int __devinit o2scr_config_check(struct pcmcia_device *p_dev,
 
 	/* IO window settings */
 	if (cfg->io.nwin > 0)
-		p_dev->io.BasePort1 = cfg->io.win[0].base;
+		io = &cfg->io;
 	else if (dflt->io.nwin > 0)
-		p_dev->io.BasePort1 = dflt->io.win[0].base;
+		io = &dflt->io;
 	else
 		return -ENODEV;
 
+	p_dev->io_lines = io->flags & CISTPL_IO_LINES_MASK;
+	p_dev->resource[0]->start = io->win[0].base;
+	if (!(io->flags & CISTPL_IO_16BIT)) {
+		p_dev->resource[0]->flags &= ~IO_DATA_PATH_WIDTH;
+		p_dev->resource[0]->flags |= IO_DATA_PATH_WIDTH_8;
+		p_dev->resource[0]->end = io->win[0].len;
+	}
+
 	/* This reserves IO space but doesn't actually enable it */
-	if (pcmcia_request_io(p_dev, &p_dev->io) != 0)
+	if (pcmcia_request_io(p_dev) != 0)
 		return -ENODEV;
 
 	if (pcmcia_request_window(p_dev, req, &p_dev->win) != 0)
 		return -ENODEV;
 
 	if (cfg->mem.nwin > 0) {
-		map.CardOffset = cfg->mem.win[0].card_addr;
+		mem = &cfg->mem;
 	} else if (dflt->mem.nwin > 0) {
-		map.CardOffset = dflt->mem.win[0].card_addr;
+		mem = &dflt->mem;
 	} else
 		return -ENODEV;
 
-	if (pcmcia_map_mem_page(p_dev, p_dev->win, &map) != 0)
+	if (pcmcia_map_mem_page(p_dev, p_dev->win, mem->win[0].card_addr) != 0)
 		return -ENODEV;
 
 	return 0;
@@ -93,17 +87,14 @@ static int __devinit o2scr_config(struct pcmcia_device *p_dev)
 	tuple.Attributes = 0;
 	tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
 
-	p_dev->io.NumPorts1 = 32;
-	p_dev->io.Attributes1 = IO_DATA_PATH_WIDTH_16;
-	p_dev->io.IOAddrLines = 5;
-	p_dev->io.NumPorts2 = 0;
-
-	/* Interrupt setup */
-	p_dev->irq.Attributes = IRQ_TYPE_DYNAMIC_SHARING;
-	p_dev->irq.Handler = &o2scr_interrupt;
+	p_dev->resource[0]->end = 32;
+	p_dev->resource[0]->flags = IO_DATA_PATH_WIDTH_16;
+//	p_dev->io_lines = 5;
+	p_dev->resource[1]->end = 0;
 
 	/* General socket configuration */
 	p_dev->conf.IntType = INT_MEMORY_AND_IO;
+	p_dev->conf.Attributes = CONF_ENABLE_IRQ;
 
 	/* Memory settings */
 	req.Attributes = WIN_DATA_WIDTH_16 | WIN_MEMORY_TYPE_CM	| WIN_ENABLE;
@@ -116,7 +107,7 @@ static int __devinit o2scr_config(struct pcmcia_device *p_dev)
 		goto failed;
 
 	if (p_dev->conf.Attributes & CONF_ENABLE_IRQ) {
-		ret = pcmcia_request_irq(p_dev, &p_dev->irq);
+		ret = pcmcia_request_irq(p_dev, o2scr_interrupt);
 		if (ret)
 			goto failed;
 	}
@@ -125,26 +116,8 @@ static int __devinit o2scr_config(struct pcmcia_device *p_dev)
 	if (ret)
 		goto failed;
 
-	/* Finally, report what we've done */
-	printk(KERN_INFO "o2scr sock %s: index 0x%02x",
-		   dev_name(&p_dev->dev), p_dev->conf.ConfigIndex);
-	if (p_dev->conf.Vpp)
-		printk(KERN_CONT ", Vpp %d.%d", p_dev->conf.Vpp/10, p_dev->conf.Vpp%10);
-	if (p_dev->conf.Attributes & CONF_ENABLE_IRQ)
-		printk(KERN_CONT ", irq %d", p_dev->irq.AssignedIRQ);
-	if (p_dev->io.NumPorts1)
-		printk(KERN_CONT ", io 0x%04x-0x%04x", p_dev->io.BasePort1,
-			   p_dev->io.BasePort1+p_dev->io.NumPorts1-1);
-	if (p_dev->io.NumPorts2)
-		printk(KERN_CONT " & 0x%04x-0x%04x", p_dev->io.BasePort2,
-			   p_dev->io.BasePort2+p_dev->io.NumPorts2-1);
-	if (p_dev->win)
-		printk(KERN_CONT ", mem 0x%06lx-0x%06lx", req.Base,
-			   req.Base+req.Size-1);
-	printk("\n");
-
 	info->mem = ioremap(req.Base, req.Size);
-	info->io = ioport_map(p_dev->io.BasePort1, p_dev->io.NumPorts1);
+	info->io = ioport_map(p_dev->resource[0]->start, resource_size(p_dev->resource[0]));
 
 	return 0;
 failed:
